@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"time"
+
+	"net/textproto"
 )
 
 func nowAdd(d time.Duration) time.Time { return time.Now().Add(d) }
@@ -80,6 +83,7 @@ func (s *session) dispatch(cmd string, args []string, rest string) bool {
 		// command exists; TOP and UIDL land in later stories and join this list there.
 		s.reply("+OK Capability list follows")
 		s.reply("USER")
+		s.reply("TOP")
 		s.reply(".")
 	case "USER":
 		if s.state != authorization {
@@ -94,6 +98,14 @@ func (s *session) dispatch(cmd string, args []string, rest string) bool {
 		s.reply("+OK")
 	case "PASS":
 		s.pass(rest)
+	case "STAT":
+		s.stat()
+	case "LIST":
+		s.list(args)
+	case "RETR":
+		s.retr(args)
+	case "TOP":
+		s.top(args)
 	case "NOOP":
 		// TRANSACTION-only per RFC 1939 §5: before authentication it must not become a way to
 		// hold a connection open for free.
@@ -147,6 +159,131 @@ func (s *session) pass(rest string) {
 	s.box = box
 	s.state = transaction
 	s.reply("+OK mailbox ready")
+}
+
+// requireTransaction refuses a mailbox command before authentication.
+func (s *session) requireTransaction() bool {
+	if s.state != transaction {
+		s.reply("-ERR command valid only after authentication")
+		return false
+	}
+	return true
+}
+
+// index parses a message number and validates it against the snapshot. POP3 numbers messages
+// from 1; the slice is 0-based.
+func (s *session) index(arg string) (int, bool) {
+	n, err := strconv.Atoi(arg)
+	if err != nil || n < 1 || n > len(s.box.Messages()) {
+		s.reply("-ERR no such message")
+		return 0, false
+	}
+	return n - 1, true
+}
+
+func (s *session) stat() {
+	if !s.requireTransaction() {
+		return
+	}
+	msgs := s.box.Messages()
+	var total int64
+	for _, m := range msgs {
+		total += m.Size
+	}
+	s.reply("+OK %d %d", len(msgs), total)
+}
+
+func (s *session) list(args []string) {
+	if !s.requireTransaction() {
+		return
+	}
+	msgs := s.box.Messages()
+
+	if len(args) == 1 {
+		i, ok := s.index(args[0])
+		if !ok {
+			return
+		}
+		s.reply("+OK %d %d", i+1, msgs[i].Size)
+		return
+	}
+
+	s.reply("+OK %d messages", len(msgs))
+	for i, m := range msgs {
+		s.reply("%d %d", i+1, m.Size)
+	}
+	s.reply(".")
+}
+
+func (s *session) retr(args []string) {
+	if !s.requireTransaction() {
+		return
+	}
+	if len(args) != 1 {
+		s.reply("-ERR RETR requires a message number")
+		return
+	}
+	i, ok := s.index(args[0])
+	if !ok {
+		return
+	}
+	s.reply("+OK %d octets", s.box.Messages()[i].Size)
+	s.stream(func(ctx context.Context, w io.Writer) error {
+		return s.box.WriteMessage(ctx, i, w)
+	})
+}
+
+func (s *session) top(args []string) {
+	if !s.requireTransaction() {
+		return
+	}
+	if len(args) != 2 {
+		s.reply("-ERR TOP requires a message number and a line count")
+		return
+	}
+	i, ok := s.index(args[0])
+	if !ok {
+		return
+	}
+	n, err := strconv.Atoi(args[1])
+	if err != nil || n < 0 {
+		s.reply("-ERR invalid line count")
+		return
+	}
+	s.reply("+OK")
+	s.stream(func(ctx context.Context, w io.Writer) error {
+		return s.box.WriteTop(ctx, i, n, w)
+	})
+}
+
+// stream writes a multi-line response body, dot-encoded.
+//
+// net/textproto's DotWriter does the encoding the protocol requires: a line of the message that
+// begins with "." is sent as ".." so the client does not read it as the terminator, and Close
+// writes the final ".\r\n". Hand-rolling this is how a message containing a lone "." on a line
+// silently truncates a session.
+//
+// A failure mid-body cannot be reported: the "+OK" is already on the wire and the client is
+// reading a message, so there is no place left to put an error. The connection is dropped
+// instead, which the client sees as an incomplete transfer and retries — better than a truncated
+// message it would accept as whole.
+func (s *session) stream(write func(context.Context, io.Writer) error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.srv.cfg.Timeout)
+	defer cancel()
+
+	_ = s.conn.SetWriteDeadline(nowAdd(s.srv.cfg.Timeout))
+	dw := textproto.NewWriter(bufio.NewWriter(s.conn)).DotWriter()
+
+	if err := write(ctx, dw); err != nil {
+		_ = dw.Close()
+		s.log("streaming body failed: %v", err)
+		_ = s.conn.Close()
+		return
+	}
+	if err := dw.Close(); err != nil {
+		s.log("closing body failed: %v", err)
+		_ = s.conn.Close()
+	}
 }
 
 func (s *session) quit() {

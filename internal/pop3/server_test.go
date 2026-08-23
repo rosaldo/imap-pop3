@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"net/textproto"
 	"runtime"
 	"strings"
 	"testing"
@@ -21,11 +23,46 @@ type fakeBackend struct {
 
 	gotUser, gotPass string
 	opened, closed   int
+
+	msgs []string // what the mailbox holds
 }
 
-type fakeMailbox struct{ b *fakeBackend }
+type fakeMailbox struct {
+	b    *fakeBackend
+	msgs []string
+}
 
 func (m *fakeMailbox) Close() error { m.b.closed++; return nil }
+
+func (m *fakeMailbox) Messages() []Message {
+	out := make([]Message, len(m.msgs))
+	for i, s := range m.msgs {
+		out[i] = Message{Size: int64(len(s))}
+	}
+	return out
+}
+
+func (m *fakeMailbox) WriteMessage(_ context.Context, i int, w io.Writer) error {
+	_, err := io.WriteString(w, m.msgs[i])
+	return err
+}
+
+func (m *fakeMailbox) WriteTop(_ context.Context, i, n int, w io.Writer) error {
+	head, body, _ := strings.Cut(m.msgs[i], "\r\n\r\n")
+	if _, err := io.WriteString(w, head+"\r\n\r\n"); err != nil {
+		return err
+	}
+	for _, line := range strings.SplitAfter(body, "\r\n") {
+		if n == 0 || line == "" {
+			break
+		}
+		if _, err := io.WriteString(w, line); err != nil {
+			return err
+		}
+		n--
+	}
+	return nil
+}
 
 func (b *fakeBackend) Open(_ context.Context, user, pass string) (Mailbox, error) {
 	b.gotUser, b.gotPass = user, pass
@@ -36,7 +73,7 @@ func (b *fakeBackend) Open(_ context.Context, user, pass string) (Mailbox, error
 		return nil, ErrAuth
 	}
 	b.opened++
-	return &fakeMailbox{b: b}, nil
+	return &fakeMailbox{b: b, msgs: b.msgs}, nil
 }
 
 // start brings up a server on a random port and returns a dial helper plus a stopper.
@@ -308,4 +345,175 @@ func TestShutdownWaitsForConnections(t *testing.T) {
 	}
 	t.Errorf("goroutines went from %d to %d — Shutdown leaked session goroutines",
 		before, runtime.NumGoroutine())
+}
+
+// authed opens a session already in TRANSACTION, holding the given messages.
+func authed(t *testing.T, msgs []string) (*conn, *fakeBackend, func()) {
+	t.Helper()
+	b := &fakeBackend{wantUser: "u@example.org", wantPass: "p", msgs: msgs}
+	dial, stop := start(t, b)
+	c := dial(t)
+	c.expectOK("greeting")
+	c.send("USER u@example.org")
+	c.expectOK("USER")
+	c.send("PASS p")
+	c.expectOK("PASS")
+	return c, b, stop
+}
+
+// body reads a dot-encoded response body and returns it decoded, exactly as a client would.
+//
+// NOTE: textproto's DotReader normalises CRLF to LF while decoding, so what comes back here uses
+// \n. That is the reader's behaviour, not the server's — rawBody is what shows the actual bytes
+// on the wire, and TestRetrKeepsCRLF asserts on those.
+func (c *conn) body() string {
+	c.t.Helper()
+	_ = c.c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	dr := textproto.NewReader(c.r).DotReader()
+	out, err := io.ReadAll(dr)
+	if err != nil {
+		c.t.Fatalf("reading body: %v", err)
+	}
+	return string(out)
+}
+
+// rawBody reads the body WITHOUT decoding, up to and including the "." terminator. This is what
+// shows whether the stuffing is on the wire at all.
+func (c *conn) rawBody() string {
+	c.t.Helper()
+	var sb strings.Builder
+	for {
+		_ = c.c.SetReadDeadline(time.Now().Add(3 * time.Second))
+		line, err := c.r.ReadString('\n')
+		if err != nil {
+			c.t.Fatalf("reading raw body: %v", err)
+		}
+		sb.WriteString(line)
+		if line == ".\r\n" {
+			return sb.String()
+		}
+	}
+}
+
+func TestStatAndList(t *testing.T) {
+	msgs := []string{"Subject: one\r\n\r\nbody one\r\n", "Subject: two\r\n\r\nbody two, longer\r\n"}
+	c, _, stop := authed(t, msgs)
+	defer stop()
+
+	c.send("STAT")
+	want := fmt.Sprintf("+OK 2 %d", len(msgs[0])+len(msgs[1]))
+	if got := c.line(); got != want {
+		t.Errorf("STAT: got %q, want %q", got, want)
+	}
+
+	c.send("LIST")
+	c.expectOK("LIST")
+	for i, m := range msgs {
+		want := fmt.Sprintf("%d %d", i+1, len(m))
+		if got := c.line(); got != want {
+			t.Errorf("LIST line %d: got %q, want %q", i+1, got, want)
+		}
+	}
+	if got := c.line(); got != "." {
+		t.Errorf("LIST terminator: got %q, want %q", got, ".")
+	}
+
+	c.send("LIST 2")
+	if got, want := c.line(), fmt.Sprintf("+OK 2 %d", len(msgs[1])); got != want {
+		t.Errorf("LIST 2: got %q, want %q", got, want)
+	}
+}
+
+// TestRetrDotStuffing is the one that matters in RETR. A line of the message that begins with a
+// dot must go out doubled, or the client reads it as the end of the message and the rest is lost
+// — while both sides think the transfer succeeded.
+func TestRetrDotStuffing(t *testing.T) {
+	msg := "Subject: dots\r\n" +
+		"\r\n" +
+		".hidden line\r\n" +
+		"..already doubled\r\n" +
+		".\r\n" +
+		"after the lone dot\r\n"
+
+	c, _, stop := authed(t, []string{msg})
+	defer stop()
+
+	c.send("RETR 1")
+	c.expectOK("RETR")
+	raw := c.rawBody()
+
+	// On the wire every leading dot is doubled.
+	for _, want := range []string{"..hidden line\r\n", "...already doubled\r\n", "..\r\n"} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("wire is missing %q — a leading dot was not stuffed:\n%q", want, raw)
+		}
+	}
+	// And the client, decoding it, gets the message back byte for byte.
+	c.send("RETR 1")
+	c.expectOK("RETR")
+	if got, want := c.body(), strings.ReplaceAll(msg, "\r\n", "\n"); got != want {
+		t.Errorf("decoded message differs:\n got %q\nwant %q", got, want)
+	}
+}
+
+// TestRetrKeepsCRLF: the message already uses CRLF. An encoder that translates every \n would
+// double the CR and corrupt every line.
+func TestRetrKeepsCRLF(t *testing.T) {
+	msg := "Subject: crlf\r\n\r\nline one\r\nline two\r\n"
+	c, _, stop := authed(t, []string{msg})
+	defer stop()
+
+	c.send("RETR 1")
+	c.expectOK("RETR")
+	raw := c.rawBody()
+
+	if strings.Contains(raw, "\r\r\n") {
+		t.Errorf("CR was doubled on the wire:\n%q", raw)
+	}
+	if body := strings.TrimSuffix(raw, ".\r\n"); body != msg {
+		t.Errorf("wire body differs:\n got %q\nwant %q", body, msg)
+	}
+}
+
+func TestTop(t *testing.T) {
+	msg := "Subject: top\r\n\r\nline 1\r\nline 2\r\nline 3\r\n"
+	c, _, stop := authed(t, []string{msg})
+	defer stop()
+
+	c.send("TOP 1 2")
+	c.expectOK("TOP")
+	got := c.body()
+	want := "Subject: top\n\nline 1\nline 2\n"
+	if got != want {
+		t.Errorf("TOP 1 2:\n got %q\nwant %q", got, want)
+	}
+
+	c.send("TOP 1 0")
+	c.expectOK("TOP 0")
+	if got, want := c.body(), "Subject: top\n\n"; got != want {
+		t.Errorf("TOP 1 0:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestMailboxCommandsRefusedBeforeAuth(t *testing.T) {
+	b := &fakeBackend{wantUser: "u@example.org", wantPass: "p", msgs: []string{"x"}}
+	dial, stop := start(t, b)
+	defer stop()
+
+	c := dial(t)
+	c.expectOK("greeting")
+	for _, cmd := range []string{"STAT", "LIST", "RETR 1", "TOP 1 1"} {
+		c.send(cmd)
+		c.expectErr(cmd + " before auth")
+	}
+}
+
+func TestMessageNumberOutOfRange(t *testing.T) {
+	c, _, stop := authed(t, []string{"only one\r\n"})
+	defer stop()
+
+	for _, cmd := range []string{"RETR 0", "RETR 2", "RETR abc", "LIST 9", "TOP 5 1", "TOP 1 -1"} {
+		c.send(cmd)
+		c.expectErr(cmd)
+	}
 }

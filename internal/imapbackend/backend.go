@@ -5,8 +5,11 @@
 package imapbackend
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -166,4 +169,110 @@ func (m *Mailbox) Close() error {
 	m.c = nil
 	_ = c.Logout().Wait()
 	return c.Close()
+}
+
+// Messages returns the snapshot taken at login.
+func (m *Mailbox) Messages() []pop3.Message {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]pop3.Message, len(m.msgs))
+	for i, msg := range m.msgs {
+		out[i] = pop3.Message{Size: msg.size}
+	}
+	return out
+}
+
+// WriteMessage streams the whole message to w.
+func (m *Mailbox) WriteMessage(ctx context.Context, index int, w io.Writer) error {
+	return m.writeSection(ctx, index, w, &imap.FetchItemBodySection{Peek: true}, -1)
+}
+
+// WriteTop streams the headers plus the first n lines of the body.
+//
+// Two fetches rather than one with both sections: the order the server returns sections in is
+// its choice, and a stream cannot be reordered after the fact. Asking for the header first and
+// the text second makes the order ours.
+func (m *Mailbox) WriteTop(ctx context.Context, index, n int, w io.Writer) error {
+	header := &imap.FetchItemBodySection{Specifier: imap.PartSpecifierHeader, Peek: true}
+	if err := m.writeSection(ctx, index, w, header, -1); err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	text := &imap.FetchItemBodySection{Specifier: imap.PartSpecifierText, Peek: true}
+	return m.writeSection(ctx, index, w, text, n)
+}
+
+// writeSection copies one body section of one message into w, streaming it. A maxLines above
+// zero stops after that many lines, which is what TOP needs.
+//
+// BODY.PEEK is used throughout: plain BODY[] sets \Seen upstream, and a POP3 client fetching
+// mail must not silently mark messages as read in someone's IMAP mailbox.
+func (m *Mailbox) writeSection(ctx context.Context, index int, w io.Writer,
+	section *imap.FetchItemBodySection, maxLines int) error {
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.c == nil {
+		return errors.New("mailbox is closed")
+	}
+	if index < 0 || index >= len(m.msgs) {
+		return fmt.Errorf("no message at index %d", index)
+	}
+
+	cmd := m.c.Fetch(imap.UIDSetNum(m.msgs[index].uid), &imap.FetchOptions{
+		BodySection: []*imap.FetchItemBodySection{section},
+	})
+	defer func() { _ = cmd.Close() }()
+
+	for {
+		msg := cmd.Next()
+		if msg == nil {
+			break
+		}
+		for {
+			item := msg.Next()
+			if item == nil {
+				break
+			}
+			body, ok := item.(imapclient.FetchItemDataBodySection)
+			if !ok {
+				continue
+			}
+			if err := copySection(w, body.Literal, maxLines); err != nil {
+				return err
+			}
+		}
+	}
+	return cmd.Close()
+}
+
+// copySection copies r into w, optionally stopping after maxLines lines.
+func copySection(w io.Writer, r io.Reader, maxLines int) error {
+	if maxLines < 0 {
+		_, err := io.Copy(w, r)
+		return err
+	}
+	// Line-bounded copy for TOP. The reader is drained either way: leaving bytes unread would
+	// desynchronise the IMAP connection, which is shared by the rest of the session.
+	br := bufio.NewReader(r)
+	written := 0
+	for {
+		line, err := br.ReadBytes('\n')
+		if written < maxLines && len(line) > 0 {
+			if _, werr := w.Write(line); werr != nil {
+				_, _ = io.Copy(io.Discard, br)
+				return werr
+			}
+			written++
+		}
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+	}
 }

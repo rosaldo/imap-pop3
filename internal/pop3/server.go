@@ -5,6 +5,7 @@ package pop3
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"sync"
@@ -23,8 +24,24 @@ type Backend interface {
 	Open(ctx context.Context, user, pass string) (Mailbox, error)
 }
 
+// Message is one entry of the session snapshot.
+type Message struct {
+	// Size in octets, as the upstream reports it.
+	Size int64
+}
+
 // Mailbox is one authenticated view of an upstream mailbox, held for the length of a session.
+//
+// The writes are streamed rather than returned as bytes: a mailbox holds messages of any size,
+// and buffering one in full to hand it over would make the server's memory a function of what
+// somebody happened to be sent.
 type Mailbox interface {
+	// Messages returns the snapshot taken at login, in POP3 order — index 0 is message 1.
+	Messages() []Message
+	// WriteMessage streams the whole message, headers and body.
+	WriteMessage(ctx context.Context, index int, w io.Writer) error
+	// WriteTop streams the headers plus the first n lines of the body.
+	WriteTop(ctx context.Context, index, n int, w io.Writer) error
 	Close() error
 }
 
