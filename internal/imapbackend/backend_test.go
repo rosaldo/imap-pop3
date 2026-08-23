@@ -240,3 +240,69 @@ func TestNoCredentialsInLogs(t *testing.T) {
 		t.Errorf("the password reached the log:\n%s", got)
 	}
 }
+
+// TestUidlPairsValidityWithUID is the guard for the identifier a client stores forever.
+//
+// The IMAP UID alone is unique only inside one UIDVALIDITY. When a mailbox is recreated the
+// server hands out a new UIDVALIDITY and starts UIDs at 1 again, so an identifier built from the
+// UID alone would repeat — and the client would either skip mail it never saw or download the
+// mailbox twice.
+func TestUidlPairsValidityWithUID(t *testing.T) {
+	// Same UID, different mailbox incarnations: the identifiers must differ.
+	if a, b := uidl(1000, 1), uidl(2000, 1); a == b {
+		t.Errorf("UIDVALIDITY is being ignored: %q == %q — recycled UIDs will collide", a, b)
+	}
+	// Same incarnation, different UIDs: also distinct.
+	if a, b := uidl(1000, 1), uidl(1000, 2); a == b {
+		t.Errorf("the UID is being ignored: %q == %q", a, b)
+	}
+	// And stable: the same inputs always give the same answer.
+	if a, b := uidl(1000, 7), uidl(1000, 7); a != b {
+		t.Errorf("not deterministic: %q != %q", a, b)
+	}
+
+	// RFC 1939 §7: at most 70 characters, printable ASCII (0x21..0x7E).
+	got := uidl(4294967295, 4294967295)
+	if len(got) > 70 {
+		t.Errorf("identifier %q is %d chars, over the RFC's 70", got, len(got))
+	}
+	for _, r := range got {
+		if r < 0x21 || r > 0x7E {
+			t.Errorf("identifier %q holds a character outside 0x21..0x7E: %q", got, r)
+		}
+	}
+}
+
+// TestUidlIsStableAcrossSessions: two logins to the same untouched mailbox must report the same
+// identifiers, or a client re-downloads everything on every poll.
+func TestUidlIsStableAcrossSessions(t *testing.T) {
+	addr := startIMAP(t, []string{"a@one.test"}, "pw", 3)
+	b := newTestBackend(Config{
+		Logger:    discardLogger(),
+		Upstreams: map[string]Upstream{"one.test": {Host: addr}},
+	})
+
+	read := func() []string {
+		box, err := b.Open(context.Background(), "a@one.test", "pw")
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		defer func() { _ = box.Close() }()
+		var out []string
+		for _, m := range box.Messages() {
+			out = append(out, m.UID)
+		}
+		return out
+	}
+
+	first, second := read(), read()
+	if len(first) != 3 {
+		t.Fatalf("got %d messages, want 3", len(first))
+	}
+	for i := range first {
+		if first[i] != second[i] {
+			t.Errorf("message %d changed identity between sessions: %q then %q",
+				i+1, first[i], second[i])
+		}
+	}
+}

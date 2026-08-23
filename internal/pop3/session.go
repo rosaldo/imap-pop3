@@ -84,6 +84,7 @@ func (s *session) dispatch(cmd string, args []string, rest string) bool {
 		s.reply("+OK Capability list follows")
 		s.reply("USER")
 		s.reply("TOP")
+		s.reply("UIDL")
 		s.reply(".")
 	case "USER":
 		if s.state != authorization {
@@ -106,6 +107,8 @@ func (s *session) dispatch(cmd string, args []string, rest string) bool {
 		s.retr(args)
 	case "TOP":
 		s.top(args)
+	case "UIDL":
+		s.uidl(args)
 	case "NOOP":
 		// TRANSACTION-only per RFC 1939 §5: before authentication it must not become a way to
 		// hold a connection open for free.
@@ -211,6 +214,28 @@ func (s *session) list(args []string) {
 	s.reply("+OK %d messages", len(msgs))
 	for i, m := range msgs {
 		s.reply("%d %d", i+1, m.Size)
+	}
+	s.reply(".")
+}
+
+func (s *session) uidl(args []string) {
+	if !s.requireTransaction() {
+		return
+	}
+	msgs := s.box.Messages()
+
+	if len(args) == 1 {
+		i, ok := s.index(args[0])
+		if !ok {
+			return
+		}
+		s.reply("+OK %d %s", i+1, msgs[i].UID)
+		return
+	}
+
+	s.reply("+OK")
+	for i, m := range msgs {
+		s.reply("%d %s", i+1, m.UID)
 	}
 	s.reply(".")
 }

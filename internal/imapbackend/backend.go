@@ -171,13 +171,27 @@ func (m *Mailbox) Close() error {
 	return c.Close()
 }
 
+// uidl builds the permanent identifier POP3 reports for a message.
+//
+// The IMAP UID alone is NOT enough. It is unique only within one UIDVALIDITY, and when a mailbox
+// is recreated the server issues a new UIDVALIDITY and recycles UIDs from 1. A client that
+// stored 1,2,3 would then see 1,2,3 pointing at different messages: it either skips everything,
+// believing it already has them, or downloads the mailbox again as duplicates. Pairing the two
+// makes the identifier survive that.
+//
+// RFC 1939 §7 caps the identifier at 70 characters of printable ASCII; two 32-bit numbers and a
+// dot use at most 21.
+func uidl(uidValidity uint32, uid imap.UID) string {
+	return fmt.Sprintf("%d.%d", uidValidity, uid)
+}
+
 // Messages returns the snapshot taken at login.
 func (m *Mailbox) Messages() []pop3.Message {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]pop3.Message, len(m.msgs))
 	for i, msg := range m.msgs {
-		out[i] = pop3.Message{Size: msg.size}
+		out[i] = pop3.Message{Size: msg.size, UID: uidl(m.uidValidity, msg.uid)}
 	}
 	return out
 }

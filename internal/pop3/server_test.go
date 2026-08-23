@@ -37,7 +37,7 @@ func (m *fakeMailbox) Close() error { m.b.closed++; return nil }
 func (m *fakeMailbox) Messages() []Message {
 	out := make([]Message, len(m.msgs))
 	for i, s := range m.msgs {
-		out[i] = Message{Size: int64(len(s))}
+		out[i] = Message{Size: int64(len(s)), UID: fmt.Sprintf("42.%d", i+1)}
 	}
 	return out
 }
@@ -515,5 +515,27 @@ func TestMessageNumberOutOfRange(t *testing.T) {
 	for _, cmd := range []string{"RETR 0", "RETR 2", "RETR abc", "LIST 9", "TOP 5 1", "TOP 1 -1"} {
 		c.send(cmd)
 		c.expectErr(cmd)
+	}
+}
+
+func TestUidl(t *testing.T) {
+	c, _, stop := authed(t, []string{"one\r\n", "two\r\n"})
+	defer stop()
+
+	c.send("UIDL")
+	c.expectOK("UIDL")
+	for i := 1; i <= 2; i++ {
+		want := fmt.Sprintf("%d 42.%d", i, i)
+		if got := c.line(); got != want {
+			t.Errorf("UIDL line %d: got %q, want %q", i, got, want)
+		}
+	}
+	if got := c.line(); got != "." {
+		t.Errorf("UIDL terminator: got %q", got)
+	}
+
+	c.send("UIDL 2")
+	if got, want := c.line(), "2 42.2"; !strings.HasSuffix(got, want) {
+		t.Errorf("UIDL 2: got %q, want it to end in %q", got, want)
 	}
 }

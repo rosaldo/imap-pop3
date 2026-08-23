@@ -28,6 +28,9 @@ type Backend interface {
 type Message struct {
 	// Size in octets, as the upstream reports it.
 	Size int64
+	// UID is the message's permanent identifier, as reported by UIDL. A client uses it to know
+	// what it has already downloaded, so it must mean the same thing forever.
+	UID string
 }
 
 // Mailbox is one authenticated view of an upstream mailbox, held for the length of a session.
