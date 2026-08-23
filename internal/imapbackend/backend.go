@@ -290,3 +290,46 @@ func copySection(w io.Writer, r io.Reader, maxLines int) error {
 		}
 	}
 }
+
+// Delete permanently removes the messages at the given snapshot indexes.
+//
+// Called once, from the POP3 UPDATE state (QUIT). Two IMAP steps: flag them \Deleted, then
+// expunge. UIDEXPUNGE is used when the server offers it, because a plain EXPUNGE removes
+// EVERYTHING flagged \Deleted in the mailbox — including messages someone else flagged from
+// another client, which this session was never asked to touch.
+func (m *Mailbox) Delete(ctx context.Context, indexes []int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.c == nil {
+		return errors.New("mailbox is closed")
+	}
+	if len(indexes) == 0 {
+		return nil
+	}
+
+	uids := make([]imap.UID, 0, len(indexes))
+	for _, i := range indexes {
+		if i < 0 || i >= len(m.msgs) {
+			return fmt.Errorf("no message at index %d", i)
+		}
+		uids = append(uids, m.msgs[i].uid)
+	}
+	set := imap.UIDSetNum(uids...)
+
+	store := &imap.StoreFlags{Op: imap.StoreFlagsAdd, Silent: true, Flags: []imap.Flag{imap.FlagDeleted}}
+	if err := m.c.Store(set, store, nil).Close(); err != nil {
+		return fmt.Errorf("flagging deleted: %w", err)
+	}
+
+	if m.c.Caps().Has(imap.CapUIDPlus) {
+		if err := m.c.UIDExpunge(set).Close(); err != nil {
+			return fmt.Errorf("uid expunge: %w", err)
+		}
+		return nil
+	}
+	if err := m.c.Expunge().Close(); err != nil {
+		return fmt.Errorf("expunge: %w", err)
+	}
+	return nil
+}

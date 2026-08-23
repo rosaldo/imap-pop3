@@ -45,6 +45,9 @@ type Mailbox interface {
 	WriteMessage(ctx context.Context, index int, w io.Writer) error
 	// WriteTop streams the headers plus the first n lines of the body.
 	WriteTop(ctx context.Context, index, n int, w io.Writer) error
+	// Delete removes the messages at the given snapshot indexes, permanently. It is called once,
+	// from QUIT, and never before — see the UPDATE state in session.go.
+	Delete(ctx context.Context, indexes []int) error
 	Close() error
 }
 

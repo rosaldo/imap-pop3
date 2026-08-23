@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -47,6 +48,10 @@ type session struct {
 
 	user string  // set by USER, only meaningful until PASS decides
 	box  Mailbox // non-nil exactly in TRANSACTION
+
+	// deleted holds the snapshot indexes marked by DELE. They are only marks: nothing is
+	// removed upstream until QUIT, and RSET clears them. See quit().
+	deleted map[int]bool
 }
 
 func (s *session) run() {
@@ -109,6 +114,10 @@ func (s *session) dispatch(cmd string, args []string, rest string) bool {
 		s.top(args)
 	case "UIDL":
 		s.uidl(args)
+	case "DELE":
+		s.dele(args)
+	case "RSET":
+		s.rset()
 	case "NOOP":
 		// TRANSACTION-only per RFC 1939 §5: before authentication it must not become a way to
 		// hold a connection open for free.
@@ -175,25 +184,65 @@ func (s *session) requireTransaction() bool {
 
 // index parses a message number and validates it against the snapshot. POP3 numbers messages
 // from 1; the slice is 0-based.
+//
+// A message already marked by DELE is refused: RFC 1939 §5 says it must not be accessible for
+// the rest of the session, even though it is still there.
 func (s *session) index(arg string) (int, bool) {
 	n, err := strconv.Atoi(arg)
 	if err != nil || n < 1 || n > len(s.box.Messages()) {
 		s.reply("-ERR no such message")
 		return 0, false
 	}
+	if s.deleted[n-1] {
+		s.reply("-ERR message %d is marked for deletion", n)
+		return 0, false
+	}
 	return n - 1, true
+}
+
+func (s *session) dele(args []string) {
+	if !s.requireTransaction() {
+		return
+	}
+	if len(args) != 1 {
+		s.reply("-ERR DELE requires a message number")
+		return
+	}
+	i, ok := s.index(args[0])
+	if !ok {
+		return
+	}
+	if s.deleted == nil {
+		s.deleted = map[int]bool{}
+	}
+	s.deleted[i] = true
+	s.reply("+OK message %d marked for deletion", i+1)
+}
+
+func (s *session) rset() {
+	if !s.requireTransaction() {
+		return
+	}
+	s.deleted = nil
+	s.reply("+OK")
 }
 
 func (s *session) stat() {
 	if !s.requireTransaction() {
 		return
 	}
-	msgs := s.box.Messages()
+	// Marked messages are invisible to STAT: the client is told what it would get if it hung up
+	// now, and what it marked is on its way out.
+	var count int
 	var total int64
-	for _, m := range msgs {
+	for i, m := range s.box.Messages() {
+		if s.deleted[i] {
+			continue
+		}
+		count++
 		total += m.Size
 	}
-	s.reply("+OK %d %d", len(msgs), total)
+	s.reply("+OK %d %d", count, total)
 }
 
 func (s *session) list(args []string) {
@@ -211,8 +260,11 @@ func (s *session) list(args []string) {
 		return
 	}
 
-	s.reply("+OK %d messages", len(msgs))
+	s.reply("+OK")
 	for i, m := range msgs {
+		if s.deleted[i] {
+			continue
+		}
 		s.reply("%d %d", i+1, m.Size)
 	}
 	s.reply(".")
@@ -235,6 +287,9 @@ func (s *session) uidl(args []string) {
 
 	s.reply("+OK")
 	for i, m := range msgs {
+		if s.deleted[i] {
+			continue
+		}
 		s.reply("%d %s", i+1, m.UID)
 	}
 	s.reply(".")
@@ -311,9 +366,34 @@ func (s *session) stream(write func(context.Context, io.Writer) error) {
 	}
 }
 
+// quit enters the UPDATE state: this, and ONLY this, is where deletions happen.
+//
+// DELE is a promise, not an execution. Expunging as each DELE arrives would mean a session that
+// drops halfway deletes messages the client never confirmed — and with "remove from server after
+// download" enabled, that is lost mail, silently. A connection that dies without QUIT must leave
+// the mailbox exactly as it was.
 func (s *session) quit() {
-	// In AUTHORIZATION there is nothing to commit. In TRANSACTION the UPDATE state belongs to
-	// the story that introduces DELE; until then QUIT only closes.
+	if s.state != transaction || len(s.deleted) == 0 {
+		s.reply("+OK bye")
+		return
+	}
+
+	indexes := make([]int, 0, len(s.deleted))
+	for i := range s.deleted {
+		indexes = append(indexes, i)
+	}
+	sort.Ints(indexes)
+
+	ctx, cancel := context.WithTimeout(context.Background(), s.srv.cfg.Timeout)
+	defer cancel()
+
+	if err := s.box.Delete(ctx, indexes); err != nil {
+		// RFC 1939 §6: if some messages could not be removed, the reply is -ERR. The client then
+		// knows not to consider them gone.
+		s.log("deleting %d messages failed: %v", len(indexes), err)
+		s.reply("-ERR some deleted messages not removed")
+		return
+	}
 	s.reply("+OK bye")
 }
 

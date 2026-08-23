@@ -24,7 +24,9 @@ type fakeBackend struct {
 	gotUser, gotPass string
 	opened, closed   int
 
-	msgs []string // what the mailbox holds
+	msgs      []string // what the mailbox holds
+	deleted   []int    // indexes the session asked to remove, in order
+	deleteErr error
 }
 
 type fakeMailbox struct {
@@ -45,6 +47,11 @@ func (m *fakeMailbox) Messages() []Message {
 func (m *fakeMailbox) WriteMessage(_ context.Context, i int, w io.Writer) error {
 	_, err := io.WriteString(w, m.msgs[i])
 	return err
+}
+
+func (m *fakeMailbox) Delete(_ context.Context, indexes []int) error {
+	m.b.deleted = append(m.b.deleted, indexes...)
+	return m.b.deleteErr
 }
 
 func (m *fakeMailbox) WriteTop(_ context.Context, i, n int, w io.Writer) error {
@@ -538,4 +545,125 @@ func TestUidl(t *testing.T) {
 	if got, want := c.line(), "2 42.2"; !strings.HasSuffix(got, want) {
 		t.Errorf("UIDL 2: got %q, want it to end in %q", got, want)
 	}
+}
+
+// TestDeleteOnlyHappensAtQuit is the guard against silent mail loss.
+//
+// DELE marks; QUIT executes. A session that dies in between must remove nothing — a client with
+// "delete from server after download" enabled would otherwise lose messages it never confirmed.
+func TestDeleteOnlyHappensAtQuit(t *testing.T) {
+	t.Run("marked then connection dropped: nothing is removed", func(t *testing.T) {
+		b := &fakeBackend{wantUser: "u@example.org", wantPass: "p", msgs: []string{"a\r\n", "b\r\n"}}
+		dial, stop := start(t, b)
+		defer stop()
+
+		c := dial(t)
+		c.expectOK("greeting")
+		c.send("USER u@example.org")
+		c.expectOK("USER")
+		c.send("PASS p")
+		c.expectOK("PASS")
+		c.send("DELE 1")
+		c.expectOK("DELE")
+
+		_ = c.c.Close() // hang up without QUIT
+
+		time.Sleep(150 * time.Millisecond)
+		if len(b.deleted) != 0 {
+			t.Errorf("deleted %v without a QUIT — a dropped session destroyed mail", b.deleted)
+		}
+	})
+
+	t.Run("marked then QUIT: removed", func(t *testing.T) {
+		c, b, stop := authed(t, []string{"a\r\n", "b\r\n", "c\r\n"})
+		defer stop()
+
+		c.send("DELE 1")
+		c.expectOK("DELE 1")
+		c.send("DELE 3")
+		c.expectOK("DELE 3")
+		c.send("QUIT")
+		c.expectOK("QUIT")
+
+		if want := []int{0, 2}; fmt.Sprint(b.deleted) != fmt.Sprint(want) {
+			t.Errorf("deleted %v, want %v", b.deleted, want)
+		}
+	})
+
+	t.Run("marked then RSET then QUIT: nothing is removed", func(t *testing.T) {
+		c, b, stop := authed(t, []string{"a\r\n", "b\r\n"})
+		defer stop()
+
+		c.send("DELE 1")
+		c.expectOK("DELE")
+		c.send("RSET")
+		c.expectOK("RSET")
+		c.send("QUIT")
+		c.expectOK("QUIT")
+
+		if len(b.deleted) != 0 {
+			t.Errorf("RSET did not clear the marks: deleted %v", b.deleted)
+		}
+	})
+}
+
+// TestMarkedMessagesAreInvisible: RFC 1939 §5 — a message marked for deletion must not be
+// reachable for the rest of the session, even though it is still on the server.
+func TestMarkedMessagesAreInvisible(t *testing.T) {
+	msgs := []string{"aaaa\r\n", "bb\r\n"}
+	c, _, stop := authed(t, msgs)
+	defer stop()
+
+	c.send("DELE 1")
+	c.expectOK("DELE")
+
+	// STAT counts and sizes only what survives.
+	c.send("STAT")
+	if got, want := c.line(), fmt.Sprintf("+OK 1 %d", len(msgs[1])); got != want {
+		t.Errorf("STAT after DELE: got %q, want %q", got, want)
+	}
+
+	// LIST skips it.
+	c.send("LIST")
+	c.expectOK("LIST")
+	var lines []string
+	for {
+		l := c.line()
+		if l == "." {
+			break
+		}
+		lines = append(lines, l)
+	}
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "2 ") {
+		t.Errorf("LIST after DELE returned %v, want only message 2", lines)
+	}
+
+	// And it cannot be fetched.
+	for _, cmd := range []string{"RETR 1", "TOP 1 1", "DELE 1"} {
+		c.send(cmd)
+		c.expectErr(cmd + " on a marked message")
+	}
+}
+
+// TestQuitReportsDeletionFailure: if the upstream refuses, the client must be told, or it will
+// consider the messages gone and never fetch them again.
+func TestQuitReportsDeletionFailure(t *testing.T) {
+	b := &fakeBackend{
+		wantUser: "u@example.org", wantPass: "p",
+		msgs:      []string{"a\r\n"},
+		deleteErr: fmt.Errorf("upstream refused"),
+	}
+	dial, stop := start(t, b)
+	defer stop()
+
+	c := dial(t)
+	c.expectOK("greeting")
+	c.send("USER u@example.org")
+	c.expectOK("USER")
+	c.send("PASS p")
+	c.expectOK("PASS")
+	c.send("DELE 1")
+	c.expectOK("DELE")
+	c.send("QUIT")
+	c.expectErr("QUIT when the deletion failed")
 }
