@@ -140,9 +140,17 @@ INFO session opened user=person@example.org messages=12
 INFO session closed user=person@example.org retrieved=3 deleted=1 duration=412ms
 ```
 
-A server that says nothing when it works cannot be told apart from a server nobody reached — and
-that distinction is the first question asked when a client "does not work". Failures are logged
-too, at warn level.
+And one when a login is refused:
+
+```
+INFO login refused user=person@example.org remote=203.0.113.7:51000 reason="credentials refused"
+```
+
+A server that says nothing cannot be told apart from a server nobody reached — and that
+distinction is the first question asked when a client "does not work". The refusal is logged even
+though a brute force will fill the log with them: being blind is the worse problem, and the reason
+given is coarse ("credentials refused" or "upstream unavailable") so that the log does not repeat
+what the other server said.
 
 What never appears is the password. There is a test asserting on that, for the failure path and
 for the success path: a credential in a log file breaks the pass-through promise as thoroughly as

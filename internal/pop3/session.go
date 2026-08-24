@@ -173,9 +173,19 @@ func (s *session) pass(rest string) {
 
 	box, err := s.srv.backend.Open(ctx, s.user, pass)
 	if err != nil {
-		// Every failure looks the same to the client, whether the credentials were wrong or the
+		// Every failure looks the same TO THE CLIENT, whether the credentials were wrong or the
 		// upstream was unreachable. Telling them apart is a gift to whoever is probing, and the
 		// distinction is useless to a legitimate client.
+		//
+		// The OPERATOR, however, gets both — including the refused attempt. Not logging refusals
+		// leaves the server silent exactly when someone is asking "why does my client not work",
+		// with no way to tell a wrong password from a client that never arrived. That is the
+		// question this log exists to answer; a brute force filling the log is a lesser problem
+		// than being blind, and the address is what identifies the attempt, never the password.
+		s.info("login refused",
+			"user", s.user,
+			"remote", s.conn.RemoteAddr().String(),
+			"reason", reasonOf(err))
 		if !errors.Is(err, ErrAuth) {
 			s.log("upstream open failed for %q: %v", s.user, err)
 		}
@@ -393,6 +403,16 @@ func (s *session) stream(write func(context.Context, io.Writer) error) {
 // drops halfway deletes messages the client never confirmed — and with "remove from server after
 // download" enabled, that is lost mail, silently. A connection that dies without QUIT must leave
 // the mailbox exactly as it was.
+// reasonOf reduces the error to something safe to log: whether the credentials were refused or
+// the upstream itself failed. The underlying message may carry detail from the other server, and
+// that belongs in the operational log, not in this one-line summary.
+func reasonOf(err error) string {
+	if errors.Is(err, ErrAuth) {
+		return "credentials refused"
+	}
+	return "upstream unavailable"
+}
+
 func (s *session) quit() {
 	if s.state != transaction || len(s.deleted) == 0 {
 		s.reply("+OK bye")

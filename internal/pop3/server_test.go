@@ -285,6 +285,13 @@ func TestPasswordNeverLogged(t *testing.T) {
 	if got := buf.String(); strings.Contains(got, "hunter2-should-never-appear") {
 		t.Errorf("the password reached the log:\n%s", got)
 	}
+
+	// The refusal itself IS logged: not doing so leaves the server silent exactly when someone
+	// asks why their client cannot log in, with no way to tell a wrong password from a client
+	// that never arrived.
+	if got := buf.String(); !strings.Contains(got, "login refused") || !strings.Contains(got, "u@example.org") {
+		t.Errorf("a refused login left no trace:\n%s", got)
+	}
 }
 
 // TestServeReturnsWhenListenerCloses is the canary for the busy loop. If Accept's error path
