@@ -115,6 +115,22 @@ a command whose absence a client may not notice.
 The server refuses to start without a certificate that loads. There is no flag to turn this off:
 a process that carries mailbox passwords has no honest reason to offer a plaintext mode.
 
+## Dependencies
+
+Two direct, both MIT: [go-imap](https://github.com/emersion/go-imap) for the IMAP client, and
+`gopkg.in/yaml.v3` for the configuration file. `go-message` and `go-sasl` come along with the
+first.
+
+Writing the IMAP client here instead was considered and rejected. What we use is seven commands
+— `LOGIN`, `SELECT`, `FETCH`, `STORE`, `EXPUNGE`, `LOGOUT`, `CAPABILITY` — but the cost is not in
+the commands: it is the response parser, with untagged responses arriving out of order, literals
+that change how the stream is read, and server continuations. Lifting out "just the Fetch" drags
+the parser along with it, so the real choice is between using the library and writing roughly a
+thousand lines of protocol code. The library is ten years old, actively maintained, and pinned.
+
+The version is pinned on purpose. `go get -u` on this dependency is a deliberate act: v2 has
+been in beta since 2024, and its API can move between betas.
+
 ## Shape of the code
 
 | package | what it holds |

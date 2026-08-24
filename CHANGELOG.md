@@ -2,6 +2,7 @@
 
 > Generated from `git` by `scripts/gen-changelog.sh` — do not edit by hand.
 
+- **v0.9.2** (2026-08-23) · `fix` — yaml.v3 is a direct dependency, not an indirect one, and the reasoning behind both is recorded: go mod tidy corrects a marking left over from adding the module before the code that imports it
 - **v0.9.1** (2026-08-23) · `docs` — README becomes a cover over docs/: install, usage, client setup and the flags up front, with the design decisions and the full configuration reference in docs/architecture.md and docs/configuration.md
 - **v0.9.0** (2026-08-23) · `feat` — end-to-end over TLS against a real IMAP server: a full session verified from the client's side and then on the server, covering dot-stuffed bodies, UIDL, the deletion that only happens at QUIT, and the BODY.PEEK that keeps a POP3 poll from marking someone's mailbox as read
 - **v0.8.0** (2026-08-23) · `feat` — configuration file and TLS-only boot: the server reads its upstream map from YAML and refuses to start without a certificate that loads, with an empty upstream map, or on a misspelled key — a mail password must never be downgraded to the clear because a path was wrong
