@@ -2,6 +2,7 @@
 
 > Generated from `git` by `scripts/gen-changelog.sh` — do not edit by hand.
 
+- **v1.3.0** (2026-08-24) · `feat` — a password with a run of spaces, a quote, a backslash, braces or an accent is proven to cross POP3, the adapter and IMAP untouched: the old end-to-end used one simple password, which survives almost any defect
 - **v1.2.0** (2026-08-24) · `feat` — a refused login is logged too: not doing so left the server silent exactly when someone asks why their client cannot connect, with no way to tell a wrong password from a client that never arrived
 - **v1.1.0** (2026-08-24) · `feat` — a session leaves a trace: one line when it authenticates and one when it ends, with what was retrieved and deleted — a server that says nothing when it works cannot be told apart from one nobody reached, which was the first question asked the day it went live
 - **v1.0.0** (2026-08-23) · `major` — first release: a POP3 server that serves an IMAP mailbox — pass-through credentials with nothing stored, upstreams resolved from the username's domain against a closed map, streamed dot-encoded bodies, UIDL paired with UIDVALIDITY, deletions that only happen at QUIT, and TLS required to start

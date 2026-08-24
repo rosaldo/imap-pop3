@@ -432,3 +432,63 @@ func TestFetchingDoesNotMarkSeen(t *testing.T) {
 		}
 	}
 }
+
+// TestSenhaAtravessaIntacta: a senha que o cliente digita tem de chegar ao IMAP byte a byte.
+//
+// Este é o teste que faltava. O unitário do pacote pop3 prova que a senha chega ao Backend
+// intacta, e o e2e provava o caminho todo — mas com uma senha simples ("s3cret"), que sobrevive
+// a quase qualquer defeito. Uma senha com espaço, dois-pontos, acento ou barra invertida atravessa
+// três camadas (linha POP3 → Backend → comando LOGIN do IMAP) e qualquer uma delas pode
+// reinterpretá-la. O sintoma seria sempre o mesmo: "senha errada", sem dizer por quê.
+func TestSenhaAtravessaIntacta(t *testing.T) {
+	senhas := []string{
+		"s3cret",            // controle
+		"com espaco",        // o separador do próprio protocolo
+		"dois  espacos",     // Fields colapsaria
+		"com:doispontos",    // separador de outros mecanismos
+		`com"aspas`,         // quoting do IMAP
+		`com\barra`,         // escape do IMAP
+		"com{chaves}",       // literal do IMAP
+		"acentuada-çãé",     // não-ASCII
+		"com'apostrofo",     // quoting de shell
+		" comecaComEspaco",  // separador ambíguo
+		"terminaComEspaco ", // trailing
+		"a$b#c%d&e",         // símbolos variados
+		"muito-longa-" + strings.Repeat("x", 200), // além de qualquer buffer
+	}
+
+	for _, senha := range senhas {
+		t.Run(senha[:min(len(senha), 24)], func(t *testing.T) {
+			const user = "person@example.org"
+			imapAddr := startIMAPWith(t, user, senha, []string{"Subject: x\r\n\r\ny\r\n"})
+			popAddr, pool := startPOP3(t, map[string]Upstream{"example.org": {Host: imapAddr}})
+
+			raw, err := tls.Dial("tcp", popAddr, &tls.Config{RootCAs: pool, ServerName: "localhost"})
+			if err != nil {
+				t.Fatalf("tls dial: %v", err)
+			}
+			defer func() { _ = raw.Close() }()
+			c := &client{t: t, c: raw, r: bufio.NewReader(raw)}
+
+			c.ok("greeting")
+			c.send("USER %s", user)
+			c.ok("USER")
+			c.send("PASS %s", senha)
+			// Se a senha se corrompeu em qualquer camada, o IMAP recusa e isto vira -ERR.
+			if got := c.line(); !strings.HasPrefix(got, "+OK") {
+				t.Fatalf("a senha %q não atravessou: %s", senha, got)
+			}
+			c.send("STAT")
+			c.ok("STAT")
+			c.send("QUIT")
+			c.ok("QUIT")
+		})
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
