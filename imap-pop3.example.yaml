@@ -1,0 +1,26 @@
+# Example configuration. Copy it, point it at your servers, and pass it with --config.
+
+# Address to serve POP3 on. 995 is the implicit-TLS port clients expect.
+listen: ":995"
+
+# Required. There is no plaintext mode: this server carries a mailbox password to a remote
+# server, so a missing certificate stops the process rather than downgrading the connection.
+tls:
+  cert: /etc/letsencrypt/live/mail.example.org/fullchain.pem
+  key: /etc/letsencrypt/live/mail.example.org/privkey.pem
+
+# How long a single command may take. RFC 1939 asks for at least 10 minutes of autologout.
+timeout: 10m
+
+# Which IMAP server serves which domain. The domain of the username decides: someone logging in
+# as "person@example.org" is sent to the server listed under "example.org".
+#
+# The map is closed on purpose. The client never names its own server — an adapter that connected
+# wherever it was told would let anyone reaching this port test credentials against any host on
+# the internet, from this machine's address.
+upstreams:
+  example.org:
+    host: imap.example.org:993
+    mailbox: INBOX # optional, INBOX when omitted
+  other.test:
+    host: mail.other.test:993
