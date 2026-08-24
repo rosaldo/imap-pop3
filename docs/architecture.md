@@ -131,6 +131,23 @@ thousand lines of protocol code. The library is ten years old, actively maintain
 The version is pinned on purpose. `go get -u` on this dependency is a deliberate act: v2 has
 been in beta since 2024, and its API can move between betas.
 
+## What ends up in the log
+
+One line when a session authenticates, one when it ends:
+
+```
+INFO session opened user=person@example.org messages=12
+INFO session closed user=person@example.org retrieved=3 deleted=1 duration=412ms
+```
+
+A server that says nothing when it works cannot be told apart from a server nobody reached — and
+that distinction is the first question asked when a client "does not work". Failures are logged
+too, at warn level.
+
+What never appears is the password. There is a test asserting on that, for the failure path and
+for the success path: a credential in a log file breaks the pass-through promise as thoroughly as
+a database would.
+
 ## Shape of the code
 
 | package | what it holds |

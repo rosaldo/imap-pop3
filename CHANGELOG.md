@@ -2,6 +2,7 @@
 
 > Generated from `git` by `scripts/gen-changelog.sh` — do not edit by hand.
 
+- **v1.1.0** (2026-08-24) · `feat` — a session leaves a trace: one line when it authenticates and one when it ends, with what was retrieved and deleted — a server that says nothing when it works cannot be told apart from one nobody reached, which was the first question asked the day it went live
 - **v1.0.0** (2026-08-23) · `major` — first release: a POP3 server that serves an IMAP mailbox — pass-through credentials with nothing stored, upstreams resolved from the username's domain against a closed map, streamed dot-encoded bodies, UIDL paired with UIDVALIDITY, deletions that only happen at QUIT, and TLS required to start
 - **v0.9.2** (2026-08-23) · `fix` — yaml.v3 is a direct dependency, not an indirect one, and the reasoning behind both is recorded: go mod tidy corrects a marking left over from adding the module before the code that imports it
 - **v0.9.1** (2026-08-23) · `docs` — README becomes a cover over docs/: install, usage, client setup and the flags up front, with the design decisions and the full configuration reference in docs/architecture.md and docs/configuration.md

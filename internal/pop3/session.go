@@ -21,6 +21,10 @@ func (s *session) log(format string, a ...any) {
 	s.srv.cfg.Logger.Warn(fmt.Sprintf(format, a...))
 }
 
+func (s *session) info(msg string, args ...any) {
+	s.srv.cfg.Logger.Info(msg, args...)
+}
+
 // state is where a session sits in the RFC 1939 flow. TRANSACTION is only reached by a
 // successful PASS, and every mailbox command is refused before that.
 type state int
@@ -52,13 +56,27 @@ type session struct {
 	// deleted holds the snapshot indexes marked by DELE. They are only marks: nothing is
 	// removed upstream until QUIT, and RSET clears them. See quit().
 	deleted map[int]bool
+
+	// Counted for the closing log line. Without it there is no way to tell "nobody connected"
+	// from "connected and it worked" — a successful session would otherwise write nothing at all.
+	retrieved int
+	opened    time.Time
 }
 
 func (s *session) run() {
 	defer func() {
-		if s.box != nil {
-			_ = s.box.Close()
+		if s.box == nil {
+			return
 		}
+		// One line per session that got as far as authenticating. It carries no credential:
+		// the username identifies the mailbox, and that is what an operator needs to answer
+		// "did the client actually fetch anything".
+		s.info("session closed",
+			"user", s.user,
+			"retrieved", s.retrieved,
+			"deleted", len(s.deleted),
+			"duration", time.Since(s.opened).Round(time.Millisecond).String())
+		_ = s.box.Close()
 	}()
 
 	s.reply("+OK POP3 server ready")
@@ -170,6 +188,8 @@ func (s *session) pass(rest string) {
 
 	s.box = box
 	s.state = transaction
+	s.opened = time.Now()
+	s.info("session opened", "user", s.user, "messages", len(box.Messages()))
 	s.reply("+OK mailbox ready")
 }
 
@@ -308,6 +328,7 @@ func (s *session) retr(args []string) {
 		return
 	}
 	s.reply("+OK %d octets", s.box.Messages()[i].Size)
+	s.retrieved++
 	s.stream(func(ctx context.Context, w io.Writer) error {
 		return s.box.WriteMessage(ctx, i, w)
 	})

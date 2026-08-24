@@ -667,3 +667,67 @@ func TestQuitReportsDeletionFailure(t *testing.T) {
 	c.send("QUIT")
 	c.expectErr("QUIT when the deletion failed")
 }
+
+// TestSessaoDeixaRastro: uma sessão bem-sucedida tem de escrever no log.
+//
+// Sem isto o servidor é mudo quando funciona, e um operador não consegue distinguir "ninguém
+// conectou" de "conectou e correu bem" — que foi exatamente a dúvida na primeira vez que este
+// adaptador foi ao ar.
+func TestSessaoDeixaRastro(t *testing.T) {
+	var buf bytes.Buffer
+	b := &fakeBackend{wantUser: "u@example.org", wantPass: "p", msgs: []string{"um\r\n", "dois\r\n"}}
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := New(b, Config{
+		Timeout: 3 * time.Second,
+		Logger:  slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})),
+	})
+	go func() { _ = srv.Serve(l) }()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}()
+
+	raw, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = raw.Close() }()
+	c := &conn{t: t, c: raw, r: bufio.NewReader(raw)}
+	c.expectOK("greeting")
+	c.send("USER u@example.org")
+	c.expectOK("USER")
+	c.send("PASS p")
+	c.expectOK("PASS")
+	c.send("RETR 1")
+	c.expectOK("RETR")
+	_ = c.body()
+	c.send("DELE 2")
+	c.expectOK("DELE")
+	c.send("QUIT")
+	c.expectOK("QUIT")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(buf.String(), "session closed") {
+		time.Sleep(10 * time.Millisecond)
+	}
+	got := buf.String()
+
+	for _, esperado := range []string{
+		"session opened", "messages=2",
+		"session closed", "retrieved=1", "deleted=1",
+		"u@example.org",
+	} {
+		if !strings.Contains(got, esperado) {
+			t.Errorf("o log não trouxe %q:\n%s", esperado, got)
+		}
+	}
+	// E o de sempre: a senha não entra em log nenhum, nem no de sucesso.
+	if strings.Contains(got, "p\n") || strings.Contains(got, "pass=") {
+		t.Errorf("a senha vazou para o log:\n%s", got)
+	}
+}
