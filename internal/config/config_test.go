@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -132,9 +133,12 @@ func TestRefusesToStart(t *testing.T) {
 			wantErr: "will not serve POP3 in the clear",
 		},
 		{
-			name:    "certificate without key",
+			// `tls.key` is optional — the key may live inside the certificate file. This one
+			// does NOT, so it still has to be refused, and the message has to say where the
+			// key was looked for instead of blaming the PEM.
+			name:    "certificate without key, and none inside it",
 			body:    "tls:\n  cert: " + cert + "\nupstreams:\n  example.org: {host: \"x:993\"}\n",
-			wantErr: "will not serve POP3 in the clear",
+			wantErr: "the key was looked for inside",
 		},
 		{
 			name:    "certificate that does not load",
@@ -180,5 +184,77 @@ func TestRefusesToStart(t *testing.T) {
 func TestMissingFile(t *testing.T) {
 	if _, err := Load(filepath.Join(t.TempDir(), "nope.yaml")); err == nil {
 		t.Error("Load succeeded on a file that does not exist")
+	}
+}
+
+// writeCombinedPEM writes ONE file holding the private key and the certificate, in the order an
+// ACME client writes it: key first, then the leaf, then the chain. Built from a real key pair,
+// not a fixture that merely looks like PEM — the point is to exercise tls.LoadX509KeyPair.
+func writeCombinedPEM(t *testing.T, dir string) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "mail.example.org"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := pem.Encode(&buf, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}); err != nil {
+		t.Fatal(err)
+	}
+	// Twice: the leaf and one more standing in for the chain. A single-certificate file would
+	// pass even if the loader stopped at the first block.
+	for range 2 {
+		if err := pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(dir, "combined.pem")
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestKeyInsideTheCertificateFile: `tls.key` may be omitted when the certificate file already
+// carries the key — the shape every ACME client that manages its own certificates writes, mox
+// included. Requiring two files forces whoever deploys next to such a server to copy and split
+// that file, and the copy goes stale at the first renewal: sixty days later the renewed
+// certificate is on disk and the adapter still serves the expired one.
+func TestKeyInsideTheCertificateFile(t *testing.T) {
+	dir := t.TempDir()
+	combined := writeCombinedPEM(t, dir)
+	body := "tls:\n  cert: " + combined + "\nupstreams:\n  example.org: {host: \"imap.example.org:993\"}\n"
+
+	cfg, err := Load(write(t, dir, body))
+	if err != nil {
+		t.Fatalf("a PEM holding the key and the chain was refused: %v", err)
+	}
+	tlsCfg, err := cfg.TLSConfig()
+	if err != nil {
+		t.Fatalf("TLSConfig: %v", err)
+	}
+	if n := len(tlsCfg.Certificates); n != 1 {
+		t.Fatalf("expected one certificate, got %d", n)
+	}
+	// The whole chain has to survive: serving only the leaf makes a client without the
+	// intermediate reject a certificate that is perfectly valid.
+	if n := len(tlsCfg.Certificates[0].Certificate); n != 2 {
+		t.Errorf("the chain lost blocks: %d certificates, expected 2", n)
+	}
+	if tlsCfg.Certificates[0].PrivateKey == nil {
+		t.Error("no private key was loaded — the key inside the certificate file was ignored")
 	}
 }

@@ -5,6 +5,11 @@ listen: ":995"
 
 # Required. There is no plaintext mode: this server carries a mailbox password to a remote
 # server, so a missing certificate stops the process rather than downgrading the connection.
+#
+# `key` is OPTIONAL. Leave it out when the certificate file already carries the private key —
+# the single-PEM shape (key, leaf, chain) that ACME clients managing their own certificates
+# write, mox among them. Pointing straight at that file means renewal needs no copy, and no
+# copy means nothing to go stale sixty days later.
 tls:
   cert: /etc/letsencrypt/live/mail.example.org/fullchain.pem
   key: /etc/letsencrypt/live/mail.example.org/privkey.pem

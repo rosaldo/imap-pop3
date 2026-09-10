@@ -51,6 +51,17 @@ upstreams:
     host: imap.example.org:993
 ```
 
+`key` may be omitted when the certificate file already holds the private key — one PEM with the
+key, the leaf and the chain, which is what ACME clients that manage their own certificates write:
+
+```yaml
+tls:
+  cert: /var/lib/acme/keycerts/letsencrypt/mail.example.org
+```
+
+Reading that file directly is the point: a split copy stops matching at the first renewal, and
+the server keeps serving an expired certificate for as long as nobody notices.
+
 Full reference in [`docs/configuration.md`](docs/configuration.md); a commented file to copy in
 [`imap-pop3.example.yaml`](imap-pop3.example.yaml).
 

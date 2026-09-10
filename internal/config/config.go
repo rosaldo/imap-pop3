@@ -73,10 +73,19 @@ func (c *Config) Validate() error {
 	// No plaintext fallback, on purpose. This server carries someone's mailbox password to a
 	// remote IMAP server; a missing certificate is a reason to stop, never a reason to serve
 	// the same thing in the clear.
-	if c.TLS.Cert == "" || c.TLS.Key == "" {
-		return fmt.Errorf("tls.cert and tls.key are required — this server will not serve POP3 in the clear")
+	if c.TLS.Cert == "" {
+		return fmt.Errorf("tls.cert is required — this server will not serve POP3 in the clear")
 	}
-	if _, err := tls.LoadX509KeyPair(c.TLS.Cert, c.TLS.Key); err != nil {
+	if _, err := tls.LoadX509KeyPair(c.TLS.Cert, c.keyPath()); err != nil {
+		// Say WHERE the key was looked for. With `tls.key` omitted the key is expected inside
+		// the certificate file, and Go's own message for that case ("found a certificate
+		// rather than a key in the PEM for the private key") reads like a corrupt file to
+		// someone who simply forgot the field.
+		if c.TLS.Key == "" {
+			return fmt.Errorf("loading the TLS certificate: %w — tls.key is not set, so the key was "+
+				"looked for inside %s; set tls.key, or point tls.cert at a PEM that holds the key "+
+				"and the chain together", err, c.TLS.Cert)
+		}
 		return fmt.Errorf("loading the TLS certificate: %w", err)
 	}
 
@@ -108,9 +117,30 @@ func (c *Config) Backend() map[string]imapbackend.Upstream {
 	return out
 }
 
+// keyPath says where the private key lives: the file configured as `tls.key`, or the
+// certificate file itself when that field is absent.
+//
+// A SINGLE FILE HOLDING BOTH IS A REAL FORMAT, not a convenience. ACME clients that manage
+// their own certificates — mox among them — keep the key and the whole chain concatenated in
+// one PEM, and refreshing it in place is how renewal works there. Demanding two files forced
+// whoever deployed this adapter next to such a server to copy and split that file on every
+// deploy, and a copy of a certificate is a copy that goes stale: sixty days later the renewed
+// certificate is on disk and the adapter is still serving the expired one.
+//
+// It works because `tls.LoadX509KeyPair` reads both arguments independently and skips the PEM
+// blocks it is not looking for: given the same path twice, the first read collects the
+// certificate chain and the second finds the key among them. The leaf must come first in the
+// file, which is what every ACME client writes.
+func (c *Config) keyPath() string {
+	if c.TLS.Key != "" {
+		return c.TLS.Key
+	}
+	return c.TLS.Cert
+}
+
 // TLSConfig builds the server's TLS configuration. Validate has already proved the pair loads.
 func (c *Config) TLSConfig() (*tls.Config, error) {
-	cert, err := tls.LoadX509KeyPair(c.TLS.Cert, c.TLS.Key)
+	cert, err := tls.LoadX509KeyPair(c.TLS.Cert, c.keyPath())
 	if err != nil {
 		return nil, err
 	}

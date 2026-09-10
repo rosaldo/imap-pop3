@@ -28,7 +28,7 @@ upstreams:
 |---|---|---|---|
 | `listen` | no | `:995` | address to serve POP3 on |
 | `tls.cert` | **yes** | — | certificate chain, PEM |
-| `tls.key` | **yes** | — | private key, PEM |
+| `tls.key` | no | the file in `tls.cert` | private key, PEM — omit it when the key is inside the certificate file |
 | `timeout` | no | `10m` | how long a single command may take |
 | `upstreams` | **yes** | — | domain → IMAP server |
 | `upstreams.<domain>.host` | **yes** | — | `host:port`, normally port 993 |
@@ -48,8 +48,22 @@ The certificate has to be valid for **the name clients connect to**, not the nam
 server behind it. Clients verify the chain; a self-signed certificate will be refused by anything
 that is not configured to trust it.
 
-Both fields are required, and the pair is loaded at boot: a path that does not exist, or a key
-that does not match the certificate, stops the process.
+`tls.cert` is required and the pair is loaded at boot: a path that does not exist, or a key that
+does not match the certificate, stops the process.
+
+**`tls.key` is optional.** Omitted, the key is read from the certificate file itself — one PEM
+holding the key, the leaf and the chain, in that order. That is what ACME clients managing their
+own certificates write (mox keeps exactly this under
+`/mox/data/acme/keycerts/letsencrypt/<name>`), and pointing at it directly is what makes renewal
+free: the file is refreshed in place, and there is no copy left behind to expire.
+
+It works because the loader reads both paths independently and skips the PEM blocks it is not
+looking for — given one path twice, the certificate chain comes from the first read and the key
+from the second. **The leaf must come first among the certificates**, which is what those clients
+write.
+
+⚠️ The pair is read **once, at boot**. When the file is renewed the running process keeps the
+certificate it already loaded, so a renewal still needs a restart.
 
 ### `timeout`
 
@@ -76,7 +90,8 @@ All of these fail at boot, loudly, instead of producing a server that looks heal
 
 | what | why it is fatal |
 |---|---|
-| `tls.cert` or `tls.key` missing | there is no plaintext mode; a mail password must not be downgraded because a path was wrong |
+| `tls.cert` missing | there is no plaintext mode; a mail password must not be downgraded because a path was wrong |
+| `tls.key` missing **and** no key inside `tls.cert` | same — and the error names the file the key was looked for in, so a forgotten field does not read as a corrupt PEM |
 | the certificate does not load | same, and better found now than at the first connection |
 | `upstreams` empty or absent | every login would be refused while the process looked fine |
 | an upstream `host` without a port | `imap.example.org` is ambiguous; `imap.example.org:993` is not |
